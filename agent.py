@@ -1,56 +1,49 @@
 import logging
+import time
 
 from dotenv import load_dotenv
 from livekit import agents
 from livekit.agents import (
     Agent,
-    AgentSession,
-    JobContext,
-    RoomInputOptions,
     AgentServer,
+    AgentSession,
+    AgentStateChangedEvent,
+    JobContext,
+    MetricsCollectedEvent,
+    RoomInputOptions,
+    metrics,
 )
 from livekit.plugins import noise_cancellation, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
-from livekit.agents import llm, stt, tts, inference
-from livekit.agents import AgentStateChangedEvent, MetricsCollectedEvent, metrics
-import time
 
-logger = logging.getLogger(__name__)
+from adapter_factory import build_llm, build_stt, build_tts
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
+ASSISTANT_INSTRUCTIONS = (
+    "You are an upbeat, slightly sarcastic voice AI for tech support"
+    "Help the caller fix issues without rambling, and keep replies under 3 sentences."
+)
 
 class Assistant(Agent):
     def __init__(self) -> None:
-        super().__init__(
-            instructions=("You are an upbeat, slightly sarcastic voice AI for tech support"
-                          "Help the caller fix issues without rambling, and keep replies under 3 sentences."),
-        )
+        super().__init__(instructions=ASSISTANT_INSTRUCTIONS)
 
 
-server = AgentServer()
-
-
-@server.rtc_session()
-async def entrypoint(ctx: JobContext):
-    session = AgentSession(
-        stt=stt.FallbackAdapter([
-            inference.STT.from_model_string("deepgram/nova-3"),
-            inference.STT.from_model_string("assemblyai/universal-streaming:en"),
-        ]),
-        llm=llm.FallbackAdapter([
-            inference.LLM.from_model_string("openai/gpt-4.1-mini"),
-            inference.LLM.from_model_string("google/gemini-2.5-flash"),
-        ]),
-        tts=tts.FallbackAdapter([
-            inference.TTS.from_model_string("cartesia/sonic-3:f31cc6a7-c1e8-4764-980c-60a361443dd1"),
-            inference.TTS.from_model_string("inworld/inworld-tts-1")
-        ]),
+def build_session() -> AgentSession:
+    return AgentSession(
+        stt=build_stt(),
+        llm=build_llm(),
+        tts=build_tts(),
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
         preemptive_generation=True,  # starts thinking alongside the user speaking
     )
 
+
+def register_metrics(ctx: JobContext, session: AgentSession) -> None:
     usage_collector = metrics.UsageCollector()
     last_eou_metrics: metrics.EOUMetrics | None = None
 
@@ -63,18 +56,25 @@ async def entrypoint(ctx: JobContext):
         metrics.log_metrics(ev.metrics)
         usage_collector.collect(ev.metrics)
 
+    @session.on("agent_state_changed")
+    def _on_agent_state_change(ev: AgentStateChangedEvent):
+        if ev.new_state == "speaking" and last_eou_metrics:
+            elapsed = time.time() - last_eou_metrics.timestamp
+            logger.info(f"Time to first audio: {elapsed:.3f}s")
+
     async def log_usage():
-        summary = usage_collector.get_summary()
-        logger.info("Usage Summary: %s", summary)
+        logger.info("Usage Summary: %s", usage_collector.get_summary())
 
     ctx.add_shutdown_callback(log_usage)
 
-    @session.on("agent_state_changed")
-    def _on_agent_state_change(ev: AgentStateChangedEvent):
-        if ev.new_state == "speaking":
-            if last_eou_metrics:
-                elapsed = time.time() - last_eou_metrics.timestamp
-                logger.info(f"Time to first audio: {elapsed:.3f}s")
+
+server = AgentServer()
+
+
+@server.rtc_session()
+async def entrypoint(ctx: JobContext):
+    session = build_session()
+    register_metrics(ctx, session)
 
     await session.start(
         agent=Assistant(),
