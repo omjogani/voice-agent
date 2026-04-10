@@ -22,6 +22,7 @@ def build_llm() -> llm.FallbackAdapter:
 
 def build_tts() -> CachedTTS:
     storage_dir = os.getenv("CACHED_TTS_STORAGE_DIR", ".tts_cache")
+
     return CachedTTS(
         primary=inference.TTS.from_model_string("cartesia/sonic-3:f31cc6a7-c1e8-4764-980c-60a361443dd1"),
         fallbacks=[inference.TTS.from_model_string("inworld/inworld-tts-1")],
