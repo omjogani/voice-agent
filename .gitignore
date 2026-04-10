@@ -1,2 +1,4 @@
 .env
 .idea
+.tts_cache/
+__pycache__

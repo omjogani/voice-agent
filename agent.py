@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 
@@ -32,15 +33,20 @@ class Assistant(Agent):
         super().__init__(instructions=ASSISTANT_INSTRUCTIONS)
 
 
-def build_session() -> AgentSession:
-    return AgentSession(
+from cached_tts import CachedTTS
+
+
+def build_session() -> tuple[AgentSession, CachedTTS]:
+    tts = build_tts()
+    session = AgentSession(
         stt=build_stt(),
         llm=build_llm(),
-        tts=build_tts(),
+        tts=tts,
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
         preemptive_generation=True,  # starts thinking alongside the user speaking
     )
+    return session, tts
 
 
 def register_metrics(ctx: JobContext, session: AgentSession) -> None:
@@ -73,8 +79,16 @@ server = AgentServer()
 
 @server.rtc_session()
 async def entrypoint(ctx: JobContext):
-    session = build_session()
+    session, cached_tts = build_session()
     register_metrics(ctx, session)
+
+    # Orphan cleanup (non-blocking)
+    asyncio.create_task(cached_tts.cleanup_orphans())
+
+    async def log_cache_summary():
+        logger.info("Cache Summary: %s", cached_tts.get_summary())
+
+    ctx.add_shutdown_callback(log_cache_summary)
 
     await session.start(
         agent=Assistant(),
